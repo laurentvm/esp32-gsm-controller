@@ -52,43 +52,6 @@ const char simPIN[] = "";   // SIM card PIN code, if any
 TinyGsmClient client(modem);
 const int port = 80;
 
-/*
-This is just to demonstrate how to use SPI device externally.
-Here we use SD card as a demonstration. In order to maintain versatility,
-I chose three boards with free pins as SPI pins
-*/
-#ifdef ENABLE_SPI_SDCARD
-
-#include "FS.h"
-#include "SD.h"
-#include <SPI.h>
-
-SPIClass SPI1(HSPI);
-
-#define MY_CS 33
-#define MY_SCLK 25
-#define MY_MISO 27
-#define MY_MOSI 26
-
-void setupSDCard()
-{
-  SPI1.begin(MY_SCLK, MY_MISO, MY_MOSI, MY_CS);
-  //Assuming use of SPI SD card
-  if (!SD.begin(MY_CS, SPI1))
-  {
-    Serial.println("Card Mount Failed");
-  }
-  else
-  {
-    Serial.println("SDCard Mount PASS");
-    String size = String((uint32_t)(SD.cardSize() / 1024 / 1024)) + "MB";
-    Serial.println(size);
-  }
-}
-#else
-#define setupSDCard()
-#endif
-
 void setupModem()
 {
 #ifdef MODEM_RST
@@ -140,8 +103,6 @@ void setup()
     Serial.println("Setting power error");
   }
 
-  setupSDCard();
-
   // Some start operations
   setupModem();
 
@@ -157,21 +118,10 @@ void loop()
   modem.restart();
 
   // Turn off network status lights to reduce current consumption
-  turnOffNetlight();
+  turnOnNetlight();
 
   // The status light cannot be turned off, only physically removed
   //turnOffStatuslight();
-
-  // Or, use modem.init() if you don't need the complete restart
-  String modemInfo = modem.getModemInfo();
-  SerialMon.print("Modem: ");
-  SerialMon.println(modemInfo);
-
-  // Unlock your SIM card with a PIN if needed
-  if (strlen(simPIN) && modem.getSimStatus() != 3)
-  {
-    modem.simUnlock(simPIN);
-  }
 
   SerialMon.print("Waiting for network...");
   if (!modem.waitForNetwork(240000L))
@@ -190,52 +140,12 @@ void loop()
     SerialMon.println("Network connected");
   }
 
-  SerialMon.print(F("Connecting to APN: "));
-  SerialMon.print(apn);
-  if (!modem.gprsConnect(apn, gprsUser, gprsPass))
-  {
-    SerialMon.println(" fail");
-    delay(10000);
-    return;
-  }
-  SerialMon.println(" OK");
-
-  SerialMon.print("Connecting to ");
-  SerialMon.print(server);
-  if (!client.connect(server, port))
-  {
-    SerialMon.println(" fail");
-    delay(10000);
-    return;
-  }
-  SerialMon.println(" OK");
-
-  // Make a HTTP GET request:
-  SerialMon.println("Performing HTTP GET request...");
-  client.print(String("GET ") + resource + " HTTP/1.1\r\n");
-  client.print(String("Host: ") + server + "\r\n");
-  client.print("Connection: close\r\n\r\n");
-  client.println();
-
-  unsigned long timeout = millis();
-  while (client.connected() && millis() - timeout < 10000L)
-  {
-    // Print available data
-    while (client.available())
-    {
-      char c = client.read();
-      SerialMon.print(c);
-      timeout = millis();
-    }
-  }
-  SerialMon.println();
-
   // Shutdown
   client.stop();
-  SerialMon.println(F("Server disconnected"));
+  SerialMon.println(F("Client disconnected"));
 
-  modem.gprsDisconnect();
-  SerialMon.println(F("GPRS disconnected"));
+  //modem.gprsDisconnect();
+  //SerialMon.println(F("GPRS disconnected"));
 
   // DTR is used to wake up the sleeping Modem
   // DTR is used to wake up the sleeping Modem
@@ -310,15 +220,15 @@ void loop()
 #endif //TEST_RING_RI_PIN
 
   // Make the LED blink three times before going to sleep
-  int i = 3;
+  int i = 10;
   while (i--)
   {
     digitalWrite(LED_GPIO, LED_ON);
     modem.sendAT("+SPWM=0,1000,80");
-    delay(500);
+    delay(50);
     digitalWrite(LED_GPIO, LED_OFF);
     modem.sendAT("+SPWM=0,1000,0");
-    delay(500);
+    delay(50);
   }
 
   //After all off
