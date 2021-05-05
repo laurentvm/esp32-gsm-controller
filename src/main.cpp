@@ -1,20 +1,10 @@
 #include <Arduino.h>
-
-// Please select the corresponding model
-
+#include <TaskScheduler.h>
 #define SIM800L_IP5306_VERSION_20190610
-// #define SIM800L_AXP192_VERSION_20200327
-// #define SIM800C_AXP192_VERSION_20200609
-// #define SIM800L_IP5306_VERSION_20200811
-
-// #define TEST_RING_RI_PIN            //Note will cancel the phone call test
-
-// #define ENABLE_SPI_SDCARD   //Uncomment will test external SD card
 
 // Define the serial console for debug prints, if needed
 //#define DUMP_AT_COMMANDS
 #define TINY_GSM_DEBUG SerialMon
-
 #include "utilities.h"
 
 // Set serial for debug console (to the Serial Monitor, default speed 115200)
@@ -39,18 +29,28 @@ TinyGsm modem(SerialAT);
 #define uS_TO_S_FACTOR 1000000ULL /* Conversion factor for micro seconds to seconds */
 #define TIME_TO_SLEEP 60          /* Time ESP32 will go to sleep (in seconds) */
 
-// Server details
-const char server[] = "vsh.pp.ua";
-const char resource[] = "/TinyGSM/logo.txt";
-
-// Your GPRS credentials (leave empty, if missing)
-const char apn[] = "";      // Your APN
-const char gprsUser[] = ""; // User
-const char gprsPass[] = ""; // Password
-const char simPIN[] = "";   // SIM card PIN code, if any
-
 TinyGsmClient client(modem);
-const int port = 80;
+
+/*
+  Semaphore
+*/
+SemaphoreHandle_t semaphoreNetworkOn; // to signalize upload is in progress
+
+void initSemaphores()
+{ // changed configSUPPORT_STATIC_ALLOCATION to 1 in FreeRTOSConfig.h to get static version of xSemCreateBin
+  semaphoreNetworkOn = xSemaphoreCreateBinary();
+  /*
+  semaphoreEndOfTrip = xSemaphoreCreateBinary(); // !!! TODO check this semaphore with semaphoreGetCount instead of polling using take and 0 blocking time - should not increment it -> TEST
+  semaphoreSPISync = xSemaphoreCreateBinary();
+  semBufferSwitch = xSemaphoreCreateBinary();
+  sdSpiMutex = xSemaphoreCreateMutex();
+
+  xSemaphoreGive(semaphoreUpload); // once created with xSemaphoreCreateBinary, bin semaphores are in state "taken"
+  xSemaphoreGive(semaphoreSPISync);
+  xSemaphoreGive(semBufferSwitch);
+  // note: semaphoreEndOfTrip is in state "taken", i.e. 0, will be set to 1 ("given") by stateChart to signalize IORoutine end of trip
+  */
+}
 
 void setupModem()
 {
@@ -74,8 +74,11 @@ void setupModem()
   digitalWrite(MODEM_PWRKEY, HIGH);
 
   // Initialize the indicator as an output
-  pinMode(LED_GPIO, OUTPUT);
+  //pinMode(LED_GPIO, OUTPUT);
   digitalWrite(LED_GPIO, LED_OFF);
+
+  xSemaphoreGive(semaphoreNetworkOn);
+  network_is_on
 }
 
 void turnOffNetlight()
@@ -89,6 +92,108 @@ void turnOnNetlight()
   SerialMon.println("Turning on SIM800 Red LED...");
   modem.sendAT("+CNETLIGHT=1");
 }
+int network_ok = 0;
+
+void ledStatus();
+
+Task ledTask(3000, TASK_FOREVER, &ledStatus);
+
+void ledStatus()
+{
+  Serial.println(F("in ledStatus"));
+  digitalWrite(LED_GPIO, LED_ON);
+  delay(50);
+  digitalWrite(LED_GPIO, LED_OFF);
+}
+
+/*
+Scheduler runner;
+void setup()
+{
+  // Set console baud rate
+  SerialMon.begin(115200);
+
+  delay(10);
+
+  // Start power management
+  if (setupPMU() == false)
+  {
+    Serial.println("Setting power error");
+    esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
+    esp_deep_sleep_start();
+  }
+  digitalWrite(LED_GPIO, LED_ON);
+  
+  // Some start operations
+  setupModem();
+
+  // Set GSM module baud rate and UART pins
+  SerialAT.begin(115200, SERIAL_8N1, MODEM_RX, MODEM_TX);
+  
+runner.init();
+Serial.println("Initialized scheduler");
+runner.addTask(ledTask);
+Serial.println("added ledTask");
+}
+
+void loop()
+{
+  runner.execute();
+}
+*/
+// Callback methods prototypes
+void t1Callback();
+void t2Callback();
+void t3Callback();
+
+//Tasks
+Task t4();
+Task t1(2000, 10, &t1Callback);
+Task t2(3000, TASK_FOREVER, &t2Callback);
+
+Scheduler runner;
+
+int network_is_on = 0;
+
+void t1Callback()
+{
+  Serial.print("t1: ");
+  Serial.println(millis());
+
+  if (t1.isFirstIteration())
+  {
+    runner.addTask(t3);
+    t3.enable();
+    Serial.println("t1: enabled t3 and added to the chain");
+  }
+
+  if (t1.isLastIteration())
+  {
+    t3.disable();
+    runner.deleteTask(t3);
+    //t2.setInterval(500);
+    Serial.println("t1: disable t3 and delete it from the chain. t2 interval set to 500");
+  }
+}
+
+void t2Callback()
+{
+  Serial.print("t2: ");
+  Serial.println(millis());
+
+  if (network_is_on)
+  {
+    int i = 10;
+    while (i--)
+    {
+      Serial.println(i);
+      digitalWrite(LED_GPIO, LED_ON);
+      delay(250);
+      digitalWrite(LED_GPIO, LED_OFF);
+      delay(250);
+    }
+  }
+}
 
 void setup()
 {
@@ -101,147 +206,38 @@ void setup()
   if (setupPMU() == false)
   {
     Serial.println("Setting power error");
+    esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
+    esp_deep_sleep_start();
   }
+  initSemaphores();
+  // turn on LED for 1 sec
+  pinMode(LED_GPIO, OUTPUT);
+  digitalWrite(LED_GPIO, HIGH);
+  delay(1000);
+  digitalWrite(LED_GPIO, LOW);
+  Serial.println("Scheduler TEST");
 
-  // Some start operations
+  runner.init();
+  Serial.println("Initialized scheduler");
+
+  //runner.addTask(t1);
+  //Serial.println("added t1");
+
+  runner.addTask(t2);
+  Serial.println("added t2");
+
+  delay(5000);
+
+  t1.enable();
+  Serial.println("Enabled t1");
+  t2.enable();
+  Serial.println("Enabled t2");
+  //setupModem
+  delay(10000);
   setupModem();
-
-  // Set GSM module baud rate and UART pins
-  SerialAT.begin(115200, SERIAL_8N1, MODEM_RX, MODEM_TX);
 }
 
 void loop()
 {
-  // Restart takes quite some time
-  // To skip it, call init() instead of restart()
-  SerialMon.println("Initializing modem...");
-  modem.restart();
-
-  // Turn off network status lights to reduce current consumption
-  turnOnNetlight();
-
-  // The status light cannot be turned off, only physically removed
-  //turnOffStatuslight();
-
-  SerialMon.print("Waiting for network...");
-  if (!modem.waitForNetwork(240000L))
-  {
-    SerialMon.println(" fail");
-    delay(10000);
-    return;
-  }
-  SerialMon.println(" OK");
-
-  // When the network connection is successful, turn on the indicator
-  digitalWrite(LED_GPIO, LED_ON);
-
-  if (modem.isNetworkConnected())
-  {
-    SerialMon.println("Network connected");
-  }
-
-  // Shutdown
-  client.stop();
-  SerialMon.println(F("Client disconnected"));
-
-  //modem.gprsDisconnect();
-  //SerialMon.println(F("GPRS disconnected"));
-
-  // DTR is used to wake up the sleeping Modem
-  // DTR is used to wake up the sleeping Modem
-  // DTR is used to wake up the sleeping Modem
-#ifdef MODEM_DTR
-  bool res;
-
-  modem.sleepEnable();
-
-  delay(100);
-
-  // test modem response , res == 0 , modem is sleep
-  res = modem.testAT();
-  Serial.print("SIM800 Test AT result -> ");
-  Serial.println(res);
-
-  delay(1000);
-
-  Serial.println("Use DTR Pin Wakeup");
-  pinMode(MODEM_DTR, OUTPUT);
-  //Set DTR Pin low , wakeup modem .
-  digitalWrite(MODEM_DTR, LOW);
-
-  // test modem response , res == 1 , modem is wakeup
-  res = modem.testAT();
-  Serial.print("SIM800 Test AT result -> ");
-  Serial.println(res);
-
-#endif
-
-#ifdef TEST_RING_RI_PIN
-#ifdef MODEM_RI
-  // Swap the audio channels
-  SerialAT.print("AT+CHFA=1\r\n");
-  delay(2);
-
-  //Set ringer sound level
-  SerialAT.print("AT+CRSL=100\r\n");
-  delay(2);
-
-  //Set loud speaker volume level
-  SerialAT.print("AT+CLVL=100\r\n");
-  delay(2);
-
-  // Calling line identification presentation
-  SerialAT.print("AT+CLIP=1\r\n");
-  delay(2);
-
-  //Set RI Pin input
-  pinMode(MODEM_RI, INPUT);
-
-  Serial.println("Wait for call in");
-  //When is no calling ,RI pin is high level
-  while (digitalRead(MODEM_RI))
-  {
-    Serial.print('.');
-    delay(500);
-  }
-  Serial.println("call in ");
-
-  //Wait 10 seconds for the bell to ring
-  delay(10000);
-
-  //Accept call
-  SerialAT.println("ATA");
-
-  delay(10000);
-
-  // Wait ten seconds, then hang up the call
-  SerialAT.println("ATH");
-#endif //MODEM_RI
-#endif //TEST_RING_RI_PIN
-
-  // Make the LED blink three times before going to sleep
-  int i = 10;
-  while (i--)
-  {
-    digitalWrite(LED_GPIO, LED_ON);
-    modem.sendAT("+SPWM=0,1000,80");
-    delay(50);
-    digitalWrite(LED_GPIO, LED_OFF);
-    modem.sendAT("+SPWM=0,1000,0");
-    delay(50);
-  }
-
-  //After all off
-  modem.poweroff();
-
-  SerialMon.println(F("Poweroff"));
-
-  esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
-
-  esp_deep_sleep_start();
-
-  /*
-    The sleep current using AXP192 power management is about 500uA,
-    and the IP5306 consumes about 1mA
-    */
+  runner.execute();
 }
